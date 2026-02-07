@@ -1,4 +1,28 @@
-하이퍼파라미터 목록
-1. 모델 각 옵션들
-2. 모델 입력 길이? 
-3. 공격에 추가할 패딩 길이 (T) 등
+# Binary-Hunter Configuration File
+
+model:
+  malconv:
+    # MalConvGCT Model Hyperparameters
+    channels: 256
+    window_size: 256
+    stride: 64
+    embd_size: 8
+    num_classes: 2
+
+attack:
+  # Adversarial Attack Settings
+  # Padding length ratio relative to the original file size (0.01 = 1%)
+  padding_ratio: 0.01
+  
+  # Number of optimization iterations (T)
+  iterations: 20
+
+explainability:
+  deep_shap:
+    # Baseline value for SHAP calculation
+    # Options: 
+    # - 'zero': Compare against all zeros (padding token)
+    # - 'embedding_mean': Compare against the average of embedding vectors
+    baseline: "zero"
+    approximatioon: true
+    
