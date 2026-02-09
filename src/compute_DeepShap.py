@@ -4,61 +4,39 @@ import torch.nn.functional as F
 import numpy as np
 from src.utils import load_config
 from contextlib import contextmanager
+import sys
 
-# models 패키지 경로를 sys.path에 추가하는 것은 외부(test.ipynb 등)에서 수행했다고 가정
-# 또는 필요시 여기서 추가. 여기서는 MalConv2-main 모델의 클래스 구조를 참고하기 위해
-# 동적으로 import 하거나, 인자로 모델 객체를 받는 방식을 사용.
+# Try to import MalConvGCT. If strictly following "no modification to models", we assume it's importable.
+# If PYTHONPATH is not set, we add it.
+try:
+    from MalConvGCT_nocat import MalConvGCT
+except ImportError:
+    sys.path.append('models/MalConv2-main')
+    from MalConvGCT_nocat import MalConvGCT
 
 class DeepShapExplainer:
     def __init__(self, model):
         self.model = model
         self.config = load_config()
-        self.baseline_type = self.config['explainability']['deep_shap']['baseline']
-        # self.approximation = self.config['explainability']['deep_shap']['approximation']
+        # Default to 'zero' if config missing
+        self.baseline_type = self.config.get('explainability', {}).get('deep_shap', {}).get('baseline', 'zero')
         
-        # 데이터를 저장할 공간
-        self.ref_activations = {}
-        self.actual_activations = {}
-        self.captured_indices = [] # selected chunks indices
+        self.captured_embeddings = []
         
-        # Monkey Patch를 위한 원본 메서드 저장
         from LowMemConv import LowMemConvBase
-        
-
-
-# __all__ = [
-#     'MalConvGCT',
-#     'MalConv',
-#     'AvastConv',
-#     'MalConvML',
-#     'LowMemConvBase',
-#     'BinaryDataset',
-#     'RandomChunkSampler',
-# ]
-        
-        
         self.original_seq2fix = LowMemConvBase.seq2fix
 
     def _get_baseline_input(self, input_tensor):
-        """
-        기준값(Baseline) 생성
-        MalConv의 경우 0 (Padding)을 기준으로 함.
-        """
         if self.baseline_type == 'zero':
             return torch.zeros_like(input_tensor)
-        elif self.baseline_type == 'embedding_mean':
-            # 임베딩 평균은 구현 복잡도가 높으므로 일단 0으로 처리하거나 추후 구현
-            return torch.zeros_like(input_tensor) 
         else:
             return torch.zeros_like(input_tensor)
 
+    @staticmethod
     def _custom_seq2fix(self_instance, x, pr_args={}):
         """
-        LowMemConvBase.seq2fix 메서드를 대체(Monkey Patch)할 함수.
-        목적: LowMemConv가 내부적으로 선택(max-pooling)한 청크의 인덱스와 
-              임베딩된 입력을 캡처하여 역전파 시 사용하기 위함.
+        Monkey Patch for LowMemConvBase.seq2fix to capture indices and embeddings (indirectly).
         """
-        # LowMemConv.py의 원본 로직을 그대로 가져오되, 필요한 정보를 self_instance._shap_data 에 저장
         receptive_window, stride, out_channels = self_instance.determinRF()
         
         if x.shape[1] < receptive_window: 
@@ -102,28 +80,15 @@ class DeepShapExplainer:
         
         x_selected = torch.nn.utils.rnn.pad_sequence(chunk_list, batch_first=True)
         
-        # --- [SHAP Capture Logic] ---
-        # 캡처된 정보를 인스턴스에 저장 (멀티 스레드 환경 아님을 가정)
-        # context_net과 main net이 모두 이 함수를 쓰므로, 호출 순서대로 저장됨
+        # Capture indices
         if not hasattr(self_instance, '_shap_captured_indices'):
             self_instance._shap_captured_indices = []
-            
         self_instance._shap_captured_indices.append(final_indices)
         
-        # ----------------------------
-
         if cur_device is not None:
             x_selected = x_selected.to(cur_device)
             
-        # 여기서 Embedding 레이어의 출력을 캡처해야 함. (Gradient의 시작점)
-        # processRange 내부에서 embd(x)를 호출함.
-        # 따라서 우리는 processRange를 호출하되, 그 입력인 x_selected 자체에 대한 Gradient를 구할 수는 없음 (LongTensor).
-        # Embedding Layer에 Hook을 걸어서 해결해야 함.
-        
         output = self_instance.processRange(x_selected.long(), **pr_args)
-        
-        # 저장된 정보를 바탕으로 나중에 매핑하기 위해 x_selected 자체는 저장하지 않아도 됨.
-        # Embedding Layer Hook에서 x_selected에 해당하는 임베딩 벡터를 잡을 것임.
         
         output = self_instance.pooling(output)
         output = output.view(output.size(0), -1)
@@ -132,7 +97,6 @@ class DeepShapExplainer:
 
     @contextmanager
     def _patch_model(self):
-        """LowMemConvBase.seq2fix를 안전하게 패치하고 복구하는 컨텍스트 매니저"""
         from LowMemConv import LowMemConvBase
         original = LowMemConvBase.seq2fix
         LowMemConvBase.seq2fix = self._custom_seq2fix
@@ -143,96 +107,95 @@ class DeepShapExplainer:
 
     def explain(self, input_tensor, target_class=1):
         """
-        Deep SHAP 값을 계산하여 반환
-        
-        Args:
-            input_tensor: (1, L) 형태의 입력 LongTensor
-            target_class: 설명하고자 하는 클래스 (0: 정상, 1: 악성)
-            
-        Returns:
-            shap_values: 입력과 동일한 길이의 1차원 SHAP 값 (numpy array)
+        Compute Deep SHAP values for Context and Feature separately.
         """
         self.model.eval()
         self.model.zero_grad()
         
-        # 기준값 생성 (Zero Padding)
+        # Temporarily disable low_mem to avoid re-computation and duplicate index capturing
+        # Check if attribute exists (MalConvGCT has it, MalConvML inherits but effectively LowMemConvBase doesn't have it, MalConvGCT adds it)
+        original_low_mem = getattr(self.model, 'low_mem', False)
+        if hasattr(self.model, 'low_mem'):
+            self.model.low_mem = False
+
         ref_input = self._get_baseline_input(input_tensor).to(input_tensor.device)
-        input_tensor = input_tensor.to(input_tensor.device) # Ensure device
+        input_tensor = input_tensor.to(input_tensor.device)
 
-        # 데이터 저장소 초기화
         self.model._shap_captured_indices = []
-        self.captured_embeddings = [] # 임베딩 벡터와 그라디언트를 저장할 리스트
+        self.captured_embeddings = []
 
-        # Embedding Layer Hook 정의
         def embedding_forward_hook(module, input, output):
-            # output: (B, C, L) or (B, L, C) depending on implementation
-            # MalConv code: x = self.embd(x); x = x.permute(0,2,1) in processRange
-            # Hook output is (B, L, Embd_Size).
-            # We need to retain grad for this output.
-            if output.requires_grad:
+            # Only capture if gradient calculation is enabled and required
+            # This filters out the forward passes during the 'max-pooling search' phase (inside torch.no_grad())
+            if torch.is_grad_enabled() and output.requires_grad:
                 output.retain_grad()
-            self.captured_embeddings.append(output)
+                self.captured_embeddings.append(output)
 
-        # Hook 등록
         handle = self.model.embd.register_forward_hook(embedding_forward_hook)
+        
+        handles = [handle]
+        # Register hook for context_net.embd if distinct
+        if hasattr(self.model, 'context_net') and hasattr(self.model.context_net, 'embd'):
+            if self.model.context_net.embd is not self.model.embd:
+                h2 = self.model.context_net.embd.register_forward_hook(embedding_forward_hook)
+                handles.append(h2)
 
+        shap_maps = []
         try:
             with self._patch_model():
-                # Actual Forward & Backward with Approximation
                 outputs = self.model(input_tensor)
                 logits = outputs[0]
                 
-                # Target Class에 대한 Score
-                target_score = logits[0, target_class]
+                # Default to target class 1 or 0 if unary
+                if logits.shape[1] > 1:
+                     target_score = logits[0, target_class]
+                else:
+                     target_score = logits[0, 0]
                 
-                # Backward Pass
                 self.model.zero_grad()
                 target_score.backward()
                 
-                # SHAP 값 계산 Logic
                 total_len = input_tensor.shape[1]
-                final_shap_map = np.zeros(total_len)
                 
                 embeddings_list = self.captured_embeddings
                 indices_list = self.model._shap_captured_indices
                 
-                # Embedding(0) 값 구하기 (Reference)
                 with torch.no_grad():
                     ref_emb_vec = self.model.embd(torch.tensor([0]).to(input_tensor.device))
-                    # shape: (1, embd_size)
                 
-                # captured_embeddings에는 context_net과 main_net의 임베딩이 모두 들어옴
-                # indices_list도 마찬가지
-                # MalConvGCT 구조상: context_net -> main_net 순서로 호출됨
-                # 따라서 zip으로 묶어서 처리 가능
-                
-                for i, (emb_out, indices_batch) in enumerate(zip(embeddings_list, indices_list)):
+                # Expecting 2 passes: context and main
+                for i in range(len(embeddings_list)):
+                    if i >= len(indices_list): break
+                    
+                    emb_out = embeddings_list[i]
+                    indices_batch = indices_list[i]
+                    
                     if emb_out.grad is None:
+                        # Append zero map if no grad
+                        shap_maps.append(np.zeros(total_len))
                         continue
                         
                     grad = emb_out.grad
-                    
-                    # 수식: phi = grad * (x - E[x])
-                    # x: emb_out (Actual Embedding)
-                    # E[x]: ref_emb_vec (Zero Padding Embedding)
-                    
                     diff = emb_out - ref_emb_vec
+                    shap_per_token = (grad * diff).sum(dim=-1) # (B, L_chunk)
                     
-                    # Element-wise multiplication followed by sum over embedding dimension
-                    shap_per_token = (grad * diff).sum(dim=-1) # (B, L)
+                    shap_values_np = shap_per_token.detach().cpu().numpy()[0]
                     
-                    shap_values_np = shap_per_token.detach().cpu().numpy()[0] # Batch 0
-                    
-                    real_indices = indices_batch[0] 
+                    final_shap_map = np.zeros(total_len)
+                    real_indices = indices_batch[0]
                     
                     current_ptr = 0
-                    receptive_window, _, _ = self.model.determinRF()
                     
-                    for start_idx in real_indices:
-                        s = max(start_idx - receptive_window, 0)
-                        e = min(start_idx + receptive_window, total_len)
-                        if e > total_len: e = total_len
+                    # Determine RF for reconstruction
+                    if i == 0 and hasattr(self.model, 'context_net'):
+                        rf, _, _ = self.model.context_net.determinRF()
+                    else:
+                        rf, _, _ = self.model.determinRF()
                         
+                    for start_idx in real_indices:
+                        s = max(start_idx - rf, 0)
+                        e = min(start_idx + rf, total_len)
+                        if e > total_len: e = total_len
                         chunk_len = e - s
                         
                         if current_ptr + chunk_len <= len(shap_values_np):
@@ -240,16 +203,65 @@ class DeepShapExplainer:
                             final_shap_map[s:e] += shap_chunk
                             current_ptr += chunk_len
                         else:
-                            break
-
-                return final_shap_map
+                            # If size mismatch (e.g. padding/chunks), break or fill
+                            # Usually exact match if logic is correct
+                            pass
+                    
+                    shap_maps.append(final_shap_map)
 
         finally:
-            handle.remove()
+            for h in handles:
+                h.remove()
+            if hasattr(self.model, 'low_mem'):
+                self.model.low_mem = original_low_mem
+            if hasattr(self.model, '_shap_captured_indices'):
+                del self.model._shap_captured_indices
+        
+        return shap_maps
+
+class MalConvGCTDeepShap(MalConvGCT):
+    def __init__(self, out_size=2, channels=128, window_size=512, stride=512, layers=1, embd_size=8, log_stride=None, low_mem=True):
+        # Match MalConvGCT constructor to ensure compatibility
+        super(MalConvGCTDeepShap, self).__init__(out_size=out_size, channels=channels, window_size=window_size, stride=stride, layers=layers, embd_size=embd_size, log_stride=log_stride, low_mem=low_mem)
+        self.explainer = DeepShapExplainer(self)
+        self._is_explaining = False
+
+    def forward(self, x):
+        # If explaining, run standard forward (explainer will handle hooks)
+        if self._is_explaining:
+            return super(MalConvGCTDeepShap, self).forward(x)
+        
+        # Normal execution
+        # Get standard outputs
+        outputs = super(MalConvGCTDeepShap, self).forward(x)
+        
+        # Compute SHAP
+        self._is_explaining = True
+        try:
+            # We assume we want to explain the prediction of the current forward pass
+            # Explain Class 1 (Malware) by default or highest prob? 
+            # Usually for malware detection, we explain "Why is it malware?" (Class 1)
+            target = 1 
+            
+            shap_maps = self.explainer.explain(x, target_class=target)
+            
+            if len(shap_maps) >= 2:
+                # Assuming order: Context, Feature (from sequential execution)
+                shap_context = shap_maps[0]
+                shap_feature = shap_maps[1]
+            elif len(shap_maps) == 1:
+                shap_context = shap_maps[0]
+                shap_feature = np.zeros_like(shap_maps[0])
+            else:
+                shap_context = np.zeros(x.shape[1])
+                shap_feature = np.zeros(x.shape[1])
+                
+        finally:
+            self._is_explaining = False
+            
+        # Return extended output
+        return outputs + (shap_context, shap_feature)
 
 def compute_deep_shap(model, input_tensor, target_class=1):
-    """
-    외부에서 호출 가능한 래퍼 함수
-    """
     explainer = DeepShapExplainer(model)
     return explainer.explain(input_tensor, target_class)
