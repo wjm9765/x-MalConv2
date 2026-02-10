@@ -1,5 +1,33 @@
 import os
 import yaml
+import datetime
+
+class Colors:
+    RESET = "\033[0m"
+    DEBUG = "\033[36m" # Cyan
+    INFO = "\033[32m"  # Green
+    WARNING = "\033[33m" # Yellow
+    ERROR = "\033[31m" # Red
+
+def log(message, level="INFO"):
+    """
+    Logs a message with timestamp and color based on severity.
+    Usage: log("Model loaded", "INFO") or log("Shape mismatch", "DEBUG")
+    """
+    level = level.upper()
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    
+    color = Colors.RESET
+    if level == "DEBUG":
+        color = Colors.DEBUG
+    elif level == "INFO":
+        color = Colors.INFO
+    elif level == "WARNING":
+        color = Colors.WARNING
+    elif level == "ERROR":
+        color = Colors.ERROR
+        
+    print(f"{Colors.RESET}[{timestamp}] {color}{level:<5}{Colors.RESET} : {message}")
 
 def load_config(config_path=None):
     """
