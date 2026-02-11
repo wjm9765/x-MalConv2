@@ -85,8 +85,7 @@ class DeepShapExplainer:
             target_score.backward()
             
             log(f"Captured embeddings count: {len(self.captured_embeddings)}", "DEBUG")
-            log(f"Captured indices list length: {len(self.model._shap_captured_indices)}", "DEBUG")
-            
+            log(f"Indices counts - Context: {len(self.model.context_net._shap_captured_indices)}, Feature: {len(self.model._shap_captured_indices)}", "DEBUG")
             total_len = input_tensor.shape[1]
             
             embeddings_list = self.captured_embeddings
