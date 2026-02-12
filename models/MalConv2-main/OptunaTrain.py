@@ -1,9 +1,6 @@
 import os
-from collections import deque
 from collections import OrderedDict 
 
-import random
-import numpy as np
 
 #from tqdm import tqdm_notebook as tqdm
 from tqdm import tqdm
@@ -12,13 +9,11 @@ import multiprocessing
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 import torch.optim as optim
 
-from torch.utils import data
 
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import DataLoader, Subset
 
 from binaryLoader import BinaryDataset, RandomChunkSampler, pad_collate_func
 from sklearn.metrics import roc_auc_score
@@ -141,7 +136,7 @@ def objective(trial):
         'lr':0.001,
     }
     
-    if not trial is None:
+    if trial is not None:
         for param, (sample_func, sample_args) in getParams().items():
             args_to_use[param] = getattr(trial, sample_func)(**sample_args)
         args_to_use['lr'] = trial.suggest_loguniform('lr', low=1e-4, high=1e-2)
@@ -230,7 +225,7 @@ def objective(trial):
 
 
             #Have to handle model state special if multi-gpu was used
-            if type(model).__name__ is "DataParallel":
+            if type(model).__name__ == "DataParallel":
                 mstd = model.module.state_dict()
             else:
                 mstd = model.state_dict()

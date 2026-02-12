@@ -1,13 +1,9 @@
-from collections import deque
 from collections import OrderedDict 
 
-import random
-import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 
 from LowMemConv import LowMemConvBase
@@ -38,7 +34,7 @@ class MalConv(LowMemConvBase):
     def __init__(self, out_size=2, channels=128, window_size=512, stride=512, embd_size=8, log_stride=None):
         super(MalConv, self).__init__()
         self.embd = nn.Embedding(257, embd_size, padding_idx=0)
-        if not log_stride is None:
+        if log_stride is not None:
             stride = 2**log_stride
     
         self.conv_1 = nn.Conv1d(embd_size, channels, window_size, stride=stride, bias=True)

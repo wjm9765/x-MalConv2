@@ -1,8 +1,5 @@
 import os
-from collections import deque
 
-import random
-import numpy as np
 
 #from tqdm import tqdm_notebook as tqdm
 from tqdm import tqdm
@@ -11,13 +8,11 @@ import multiprocessing
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 import torch.optim as optim
 
-from torch.utils import data
 
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import DataLoader
 
 #from MalConv import MalConv
 from MalConvGCT_nocat import MalConvGCT
@@ -179,7 +174,7 @@ for epoch in tqdm(range(EPOCHS)):
 
     
     #Have to handle model state special if multi-gpu was used
-    if type(model).__name__ is "DataParallel":
+    if type(model).__name__ == "DataParallel":
         mstd = model.module.state_dict()
     else:
         mstd = model.state_dict()

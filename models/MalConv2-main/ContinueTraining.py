@@ -1,9 +1,5 @@
 import os
-from collections import deque
-from collections import OrderedDict 
 
-import random
-import numpy as np
 
 #from tqdm import tqdm_notebook as tqdm
 from tqdm import tqdm
@@ -18,14 +14,12 @@ from torch.optim.lr_scheduler import StepLR
 
 import torch.optim as optim
 
-from torch.utils import data
 
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import DataLoader, Subset
 
 from binaryLoader import BinaryDataset, RandomChunkSampler, pad_collate_func
 from sklearn.metrics import roc_auc_score
 
-import optuna
 
 import argparse
 
@@ -111,13 +105,13 @@ def random_split(dataset, lengths):
 
 
 if MODEL_NAME.lower() == "MalConv".lower():
-    from MalConv import getParams, initModel
+    from MalConv import initModel
 elif MODEL_NAME.lower() == "Avast".lower():
-    from AvastStyleConv import getParams, initModel
+    from AvastStyleConv import initModel
 elif MODEL_NAME.lower() == "MalConvML".lower():
-    from MalConvML import getParams, initModel
+    from MalConvML import initModel
 elif MODEL_NAME.lower() == "MalConvGCT".lower():
-    from MalConvGCT import getParams, initModel
+    from MalConvGCT import initModel
     print("CORRECT GCT")
 
 
@@ -239,7 +233,7 @@ with open(base_name + ".csv", 'w') as csv_log_out:
 
 
         #Have to handle model state special if multi-gpu was used
-        if type(model).__name__ is "DataParallel":
+        if type(model).__name__ == "DataParallel":
             mstd = model.module.state_dict()
         else:
             mstd = model.state_dict()

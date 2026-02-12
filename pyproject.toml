@@ -14,3 +14,26 @@ dependencies = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["MalConv2-main"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+# 3rd party libs might lack types
+disable_error_code = ["import-untyped"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "ruff>=0.15.0",
+]

@@ -1,7 +1,5 @@
-from collections import deque
 from collections import OrderedDict 
 
-import random
 import numpy as np
 
 import torch
@@ -41,7 +39,7 @@ class MalConvGCT(LowMemConvBase):
         super(MalConvGCT, self).__init__()
         self.low_mem = low_mem
         self.embd = nn.Embedding(257, embd_size, padding_idx=0)
-        if not log_stride is None:
+        if log_stride is not None:
             stride = 2**log_stride
         
         self.context_net = MalConvML(out_size=channels, channels=channels, window_size=window_size, stride=stride, layers=layers, embd_size=embd_size)

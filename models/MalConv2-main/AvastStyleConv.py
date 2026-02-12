@@ -1,13 +1,10 @@
-from collections import deque
 from collections import OrderedDict 
 
-import random
 import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 from LowMemConv import LowMemConvBase
 

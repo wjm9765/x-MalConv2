@@ -1,23 +1,16 @@
 import os
-from collections import deque
 
 import random
 import numpy as np
 
-from tqdm import tqdm_notebook as tqdm
 
 import gzip
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
-import torch.optim as optim
 
 from torch.utils import data
 
-from torch.utils.data import Dataset, DataLoader, Subset
 
 
 class BinaryDataset(data.Dataset):

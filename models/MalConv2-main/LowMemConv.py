@@ -1,12 +1,9 @@
-from collections import deque
 
-import random
 import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 def drop_zeros_hook(module, grad_input, grad_out):
     """
