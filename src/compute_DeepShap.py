@@ -49,19 +49,16 @@ class DeepShapExplainer:
             # 2. Prepare Baseline (Zero Embeddings)
             baseline_combined = torch.zeros_like(emb_combined)
             
-            # 3. Initialize SHAP GradientExplainer
-            # GradientExplainer is more robust and supports autograd for any layer type
-            # It approximates SHAP values by integrating gradients along the path from baseline to input.
-            explainer = shap.GradientExplainer(self.model, baseline_combined)
+            # 3. Initialize SHAP DeepExplainer
+            # The user requested to use the "Baseline (0) vs Input" comparison logic (DeepLIFT).
+            # We switched back from GradientExplainer/FastGradient to DeepExplainer.
+            # DeepExplainer calculates (y - y_ref) / (x - x_ref) * x to handle saturation.
+            explainer = shap.DeepExplainer(self.model, baseline_combined)
             
             # 4. Compute SHAP Values
-            # GradientExplainer returns list/array of attributions
             try:
-                # shap_values method for GradientExplainer
-                # Reduce nsamples to speed up execution. 
-                # Default is 200, which means 200 forward/backward passes per sample.
-                # Setting nsamples=50 for faster approximation.
-                shap_values = explainer.shap_values(emb_combined, nsamples=50)
+                # check_additivity=False allows small numerical errors without crashing
+                shap_values = explainer.shap_values(emb_combined, check_additivity=False)
             except Exception as e:
                 import traceback
                 log(f"SHAP explainer.shap_values failed: {e}\n{traceback.format_exc()}", "ERROR")

@@ -9,6 +9,9 @@ model:
     embd_size: 8
     num_classes: 2
 
+shap_nsamples: 10 # Number of samples for GradientExplainer approximation (Lower = Faster, but typical 10-20 to capture context)
+shap_fast_approximation: false # Set to FALSE to capture Saturated Context (Uses GradientExplainer)
+
 attack:
   # Adversarial Attack Settings
   # Padding length ratio relative to the original file size (0.01 = 1%)
