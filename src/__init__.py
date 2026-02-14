@@ -8,4 +8,5 @@ __all__ = [
     "MalConvGCTDeepShap",
     "load_config",
     "log",
+    "generate_adversarial_example" ,
 ]

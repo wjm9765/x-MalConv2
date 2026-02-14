@@ -48,7 +48,7 @@ class LowMemConvBase(nn.Module):
         self.pooling = nn.AdaptiveMaxPool1d(1)
     #   self.pooling.register_backward_hook(drop_zeros_hook)
         self.cat = CatMod()
-        self.cat.register_backward_hook(drop_zeros_hook)
+        # self.cat.register_backward_hook(drop_zeros_hook)
         self.receptive_field = None
         
         #Used to force checkpoint code to behave correctly due to poor design https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11

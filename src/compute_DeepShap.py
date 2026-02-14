@@ -1,201 +1,135 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+import shap
 from .utils import load_config, log
 from MalConvGCT_nocat import MalConvGCT
 
 
 class DeepShapExplainer:
     """
-    Implements DeepSHAP explanation for MalConvGCT models.
-
-    This implementation adapts the Deep LIFT/SHAP algorithm for the specialized architecture
-    of MalConvGCT (which includes Gated Convolutional Transformers and Max-Pooling over long sequences).
-
-    Reference:
-    - Lundberg, S. M., & Lee, S. I. (2017). A unified approach to interpreting model predictions.
-    - Captum Library (PyTorch): https://captum.ai/
-
-    Note for Open Source Users:
-    - This implementation assumes 'target_class=1' (Malware) by default.
-    - Low-memory optimizations in MalConvGCT are temporarily disabled during explanation to ensure correct gradient flow.
+    Implements DeepSHAP explanation using the official `shap` library.
+    
+    This wrapper bridges the MalConvGCT model (which takes integer bytes) 
+    with shap.GradientExplainer (which is more robust to custom layers like AdaptiveMaxPool1d).
+    Replaces DeepExplainer with GradientExplainer to resolve Additivity Mismatch and Layer Recognition issues.
     """
 
     def __init__(self, model):
         self.model = model
         self.config = load_config()
-        self.baseline_type = (
-            self.config.get("explainability", {})
-            .get("deep_shap", {})
-            .get("baseline", "zero")
-        )
-
-        self.captured_embeddings = []
-
-    def _get_baseline_input(self, input_tensor):
-        """
-        Generates baseline input (reference) for SHAP calculation.
-
-        Default: Zero tensor (representing empty/padding bytes).
-
-        [Customization Note]:
-        If you want to use a different baseline (e.g., average embedding, or benign file sample),
-        modify this method.
-        """
-        if self.baseline_type == "zero":
-            return torch.zeros_like(input_tensor)
-        else:
-            # User can modify this to add other baseline types
-            return torch.zeros_like(input_tensor)
 
     def explain(self, input_tensor, target_class=1):
         """
-        Compute Deep SHAP values for Context and Feature separately.
-
-        Args:
-            input_tensor: (Batch, Length) integer tensor of byte values.
-            target_class: The class index to explain (Default 1 for Malware).
+        Compute SHAP values using shap.GradientExplainer.
         """
         self.model.eval()
         self.model.zero_grad()
-
+        
+        # Disable low_mem to avoid checkpointing issues with SHAP
         original_low_mem = getattr(self.model, "low_mem", False)
         if hasattr(self.model, "low_mem"):
             self.model.low_mem = False
 
-        if hasattr(self.model, "context_net"):
-            self.model.context_net._shap_captured_indices = []
-
-        input_tensor = input_tensor.to(input_tensor.device)
-
-        self.model._shap_captured_indices = []
-        self.captured_embeddings = []
-
-        def embedding_forward_hook(module, input, output):
-            # Only capture if gradient calculation is enabled and required
-            # This filters out the forward passes during the 'max-pooling search' phase (inside torch.no_grad())
-            if torch.is_grad_enabled() and output.requires_grad:
-                output.retain_grad()
-                self.captured_embeddings.append(output)
-
-        handle = self.model.embd.register_forward_hook(embedding_forward_hook)
-
-        handles = [handle]
-        # Register hook for context_net.embd if distinct
-        if hasattr(self.model, "context_net") and hasattr(
-            self.model.context_net, "embd"
-        ):
-            if self.model.context_net.embd is not self.model.embd:
-                h2 = self.model.context_net.embd.register_forward_hook(
-                    embedding_forward_hook
-                )
-                handles.append(h2)
-
-        shap_maps = []
         try:
-            outputs = self.model(input_tensor)
-            logits = outputs[0]
-
-            # Default to target class 1 or 0 if unary
-            if logits.shape[1] > 1:
-                target_score = logits[0, target_class]
-            else:
-                target_score = logits[0, 0]
-
-            self.model.zero_grad()
-            target_score.backward()
-
-            total_len = input_tensor.shape[1]
-
-            embeddings_list = self.captured_embeddings
-            indices_list = []
-            if hasattr(self.model, "context_net") and hasattr(
-                self.model.context_net, "_shap_captured_indices"
-            ):
-                indices_list.extend(self.model.context_net._shap_captured_indices)
-            indices_list.extend(self.model._shap_captured_indices)
-
+            input_tensor = input_tensor.to(next(self.model.parameters()).device)
+            
+            # 1. Prepare Embeddings (Inputs for SHAP)
+            # We concatenate ContextNet and FeatureNet embeddings into a single tensor
+            # to work around SHAP explainer issues with multiple inputs.
+            # This ensures we get a single attribution map (B, L, 2*D) that we can split later.
             with torch.no_grad():
-                ref_emb_vec = self.model.embd(torch.tensor([0]).to(input_tensor.device))
+                emb_main = self.model.embd(input_tensor)
+                emb_context = self.model.context_net.embd(input_tensor)
+                
+            # Combine: (B, L, D) + (B, L, D) -> (B, L, 2*D)
+            # First half is Context, Second half is Feature
+            emb_combined = torch.cat([emb_context, emb_main], dim=-1)
 
-            for i in range(len(embeddings_list)):
-                if i >= len(indices_list):
-                    break
+            # 2. Prepare Baseline (Zero Embeddings)
+            baseline_combined = torch.zeros_like(emb_combined)
+            
+            # 3. Initialize SHAP GradientExplainer
+            # GradientExplainer is more robust and supports autograd for any layer type
+            # It approximates SHAP values by integrating gradients along the path from baseline to input.
+            explainer = shap.GradientExplainer(self.model, baseline_combined)
+            
+            # 4. Compute SHAP Values
+            # GradientExplainer returns list/array of attributions
+            try:
+                # shap_values method for GradientExplainer
+                # Reduce nsamples to speed up execution. 
+                # Default is 200, which means 200 forward/backward passes per sample.
+                # Setting nsamples=50 for faster approximation.
+                shap_values = explainer.shap_values(emb_combined, nsamples=50)
+            except Exception as e:
+                import traceback
+                log(f"SHAP explainer.shap_values failed: {e}\n{traceback.format_exc()}", "ERROR")
+                raise e
+            
+            # Debug Log
+            val_type = type(shap_values)
+            val_len = len(shap_values) if isinstance(shap_values, list) else "N/A"
+            # val_shape might not be available on list
+            log(f"SHAP Values Info: Type={val_type}, Len={val_len}", "INFO")
 
-                emb_out = embeddings_list[i]
-                indices_batch = indices_list[i]
-
-                if emb_out.grad is None:
-                    # Append zero map if no grad
-                    shap_maps.append(np.zeros(total_len))
-                    continue
-
-                grad = emb_out.grad
-
-                # DeepLIFT/DeepSHAP Formula: (Gradient * (Input - Reference))
-                diff = emb_out - ref_emb_vec
-                shap_per_token = (grad * diff).sum(dim=-1)  # (B, L_chunk)
-
-                shap_values_np = shap_per_token.detach().cpu().numpy()[0]
-
-                final_shap_map = np.zeros(total_len)
-                real_indices = indices_batch[0]
-
-                current_ptr = 0
-
-                if i == 0 and hasattr(self.model, "context_net"):
-                    rf, _, _ = self.model.context_net.determinRF()
+            # 5. Extract Target Class Attribution
+            target_shap = None
+            
+            if isinstance(shap_values, list):
+                if len(shap_values) <= target_class:
+                     if len(shap_values) > 0: target_shap = shap_values[0] # Fallback
+                     else: raise IndexError("shap_values is empty list")
                 else:
-                    rf, _, _ = self.model.determinRF()
+                     target_shap = shap_values[target_class]
+            elif isinstance(shap_values, np.ndarray):
+                if shap_values.ndim == 4 and shap_values.shape[-1] > target_class:
+                     target_shap = shap_values[..., target_class]
+                else:
+                     target_shap = shap_values
 
-                for idx_counter, start_idx in enumerate(real_indices):
-                    s = max(start_idx - rf, 0)
-                    e = min(start_idx + rf, total_len)
-                    if e > total_len:
-                        e = total_len
-                    chunk_len = e - s
+            if target_shap is None:
+                 raise ValueError("Failed to extract target_shap")
 
-                    if current_ptr + chunk_len <= len(shap_values_np):
-                        shap_chunk = shap_values_np[
-                            current_ptr : current_ptr + chunk_len
-                        ]
-                        final_shap_map[s:e] += shap_chunk
-                        current_ptr += chunk_len
-                    else:
-                        # If size mismatch (e.g. padding/chunks), break or fill
-                        # Usually exact match if logic is correct
-                        log(
-                            f"Layer {i}: Size mismatch! Need {chunk_len}, have {len(shap_values_np) - current_ptr}",
-                            "WARNING",
-                        )
+            # target_shap should now be ndarray of shape (B, L, 2*D)
+            # We split it back into Context and Feature attribution
+            try:
+                emb_dim = emb_context.shape[-1] # D
+                # Verify shape matches combined expectation
+                if target_shap.shape[-1] == 2 * emb_dim:
+                    attr_context = target_shap[..., :emb_dim]
+                    attr_feature = target_shap[..., emb_dim:]
+                else:
+                    log(f"SHAP Warning: target_shap dim {target_shap.shape[-1]} != 2*emb_dim {2*emb_dim}. Using duplicaton fallback.", "WARNING")
+                    attr_context = target_shap
+                    attr_feature = target_shap
+            except Exception as split_err:
+                 log(f"SHAP Split Error: {split_err}. Fallback to duplicate.", "ERROR")
+                 attr_context = target_shap
+                 attr_feature = target_shap
 
-                shap_maps.append(final_shap_map)
+             # Sum over embedding dimension
+            shap_context_map = np.sum(attr_context, axis=-1)[0]
+            shap_feature_map = np.sum(attr_feature, axis=-1)[0]
+            
+            return [shap_context_map, shap_feature_map]
 
         except Exception as e:
-            log(f"Exception during DeepSHAP explanation: {str(e)}", "ERROR")
+            import traceback
+            log(f"SHAP Library Error: {str(e)}\n{traceback.format_exc()}", "ERROR")
+            # Fallback or return zeros
+            size = input_tensor.shape[1]
+            return [np.zeros(size), np.zeros(size)]
 
         finally:
-            for h in handles:
-                h.remove()
-            if hasattr(self.model, "low_mem"):
+            # Restore state
+             if hasattr(self.model, "low_mem"):
                 self.model.low_mem = original_low_mem
-            if hasattr(self.model, "_shap_captured_indices"):
-                del self.model._shap_captured_indices
-            if hasattr(self.model, "context_net") and hasattr(
-                self.model.context_net, "_shap_captured_indices"
-            ):
-                del self.model.context_net._shap_captured_indices
-
-        return shap_maps
 
 
 class MalConvGCTDeepShap(MalConvGCT):
     """
-    Wrapper class for MalConvGCT to enable DeepSHAP explanation.
-
-    This class patches the `seq2fix` method to capture the max-pooling indices
-    during the forward pass, which are necessary to map the importance values
-    back to the original byte locations.
+    Wrapper class for MalConvGCT to enable DeepSHAP explanation with shap library.
     """
 
     def __init__(
@@ -219,51 +153,161 @@ class MalConvGCTDeepShap(MalConvGCT):
             log_stride=log_stride,
             low_mem=low_mem,
         )
+        self.embd_size = embd_size
         self.explainer = DeepShapExplainer(self)
         self._is_explaining = False
+        
+        import types
+        # 1. Patch seq2fix for both main and context net
+        self.seq2fix = types.MethodType(self.__class__.seq2fix, self)
+        
+        # 2. Patch _process_embeddings (Assign correct version for each model type)
+        # Main model is MalConvGCT
+        self._process_embeddings = types.MethodType(self.__class__._process_embeddings_gct, self)
+        
         if hasattr(self, "context_net"):
-            import types
-
             self.context_net.seq2fix = types.MethodType(
                 self.__class__.seq2fix, self.context_net
             )
-        # --------------------------------
+            # Context net is MalConvML (Simpler structure)
+            self.context_net._process_embeddings = types.MethodType(
+                self.__class__._process_embeddings_ml, self.context_net
+            )
+            # Initialize _is_explaining and saved_indices for context_net
+            self.context_net._is_explaining = False
+            self.context_net.saved_indices = None
 
-    def forward(self, x):
-        if self._is_explaining:
-            if hasattr(self, "context_net"):
-                self.context_net._is_explaining = True
+        # 3. Remove conflicting backward hooks from LowMemConvBase
+        # SHAP uses standard backward hooks, and the custom drop_zeros_hook
+        # in LowMemConvBase (using register_backward_hook) causes a conflict
+        # with PyTorch's newer full backward hooks or SHAP's internal hooks.
+        # We remove them to ensure compatibility.
+        
+        # Remove hook from self.cat
+        if hasattr(self, "cat") and hasattr(self.cat, "_backward_hooks"):
+            self.cat._backward_hooks.clear()
+            
+        # Remove hook from context_net.cat if it exists
+        if hasattr(self, "context_net") and hasattr(self.context_net, "cat") and hasattr(self.context_net.cat, "_backward_hooks"):
+            self.context_net.cat._backward_hooks.clear()
+
+    def _process_embeddings_gct(self, x, gct=None):
+        """
+        MalConvGCT specific embedding processing (with Gating).
+        """
+        for conv_glu, linear_cntx, conv_share in zip(self.convs, self.linear_atn, self.convs_share):
+            x = F.glu(conv_glu(x), dim=1)
+            x = F.leaky_relu(conv_share(x))
+            
+            B = x.shape[0]
+            C = x.shape[1]
+            
+            if gct is not None:
+                ctnx = torch.tanh(linear_cntx(gct))
+                ctnx = torch.unsqueeze(ctnx, dim=2)
+                x_tmp = x.view(1,B*C,-1) 
+                x_tmp = F.conv1d(x_tmp, ctnx, groups=B)
+                x_gates = x_tmp.view(B, 1, -1)
+                gates = torch.sigmoid( x_gates )
+                x = x * gates
+        return x
+
+    def _process_embeddings_ml(self, x, gct=None):
+        """
+        MalConvML specific embedding processing (Simple Conv, No Gating).
+        Matches MalConvML.processRange logic.
+        """
+        # MalConvML uses self.convs and self.convs_1
+        # No linear_atn, No GCT gating
+        
+        for conv_glu, conv_share in zip(self.convs, self.convs_1):
+             x = F.leaky_relu(conv_share(F.glu(conv_glu(x), dim=1)))
+        
+        return x
+
+    def forward(self, x, *args):
+        """
+        Modified forward to handle both:
+        1. Normal inference (Integer/Long input)
+        2. SHAP explanation (List/Tuple of Embeddings) or Unpacked arguments
+        """
+        # Handle SHAP unpacking arguments (x=emb_context, args[0]=emb_main)
+        if args:
+            x = [x, args[0]]
+
+        # Case 3: Combined Embedding Input (Workaround for SHAP single-input issue)
+        # DeepShapExplainer passes (B, L, 2*D) combined tensor.
+        if isinstance(x, torch.Tensor) and x.ndim == 3 and x.shape[-1] == 2 * self.embd_size:
+            # SHAP internal execution - no need to recursively explain
+            # Split back into Context and Feature
+            
+            emb_context = x[..., :self.embd_size]
+            emb_main = x[..., self.embd_size:]
+            
+            # Context Net Path
+            global_context = self.context_net.seq2fix(emb_context)
+            
+            # Feature Net Path
+            post_conv = self.seq2fix(emb_main, pr_args={'gct': global_context})
+            
+            # Rest of the network (FC layers)
+            penult = F.leaky_relu(self.fc_1(post_conv))
+            logits = self.fc_2(penult)
+            return logits
+
+        # IMPORTANT: If input x is FloatTensor (Embeddings) but NOT combined (just 1D embeddings),
+        # it likely comes from adversarial attack or gradient calculation.
+        # In this case, we DO NOT perform explanation.
+        if isinstance(x, torch.Tensor) and x.is_floating_point():
+             # Standard Forward for embeddings (using patched seq2fix)
+             outputs = super().forward(x)
+             # Return just logits (or tuple) without SHAP
+             return outputs
+
+        # Case 2: SHAP Execution (Input is list [emb_context, emb_main])
+        if isinstance(x, (list, tuple)):
+            emb_context, emb_main = x
+            
+            # Context Net Path
+            # We assume seq2fix is patched to handle embeddings
+            global_context = self.context_net.seq2fix(emb_context)
+            
+            # Feature Net Path
+            # pr_args passes global context
+            # We call self.seq2fix on emb_main
+            post_conv = self.seq2fix(emb_main, pr_args={'gct': global_context})
+            
+            # Rest of the network (FC layers)
+            penult = F.leaky_relu(self.fc_1(post_conv))
+            logits = self.fc_2(penult)
+            return logits
+
+        # Case 1: Normal Inference (or Triggering Explanation)
+        # ---------------------------------------------------
+        # Optimization: If gradients are disabled (inference mode) or already explaining,
+        # we skip the SHAP explanation step. SHAP requires grad access.
+        if self._is_explaining or not torch.is_grad_enabled():
             return super().forward(x)
 
+        # Standard Forward
         outputs = super().forward(x)
 
         # Compute SHAP
         self._is_explaining = True
+        if hasattr(self, "context_net"):
+            self.context_net._is_explaining = True
+            
         try:
-            # We assume we want to explain the prediction of the current forward pass
             target = 1
-
-            shap_maps = self.explainer.explain(x, target_class=target)
-
-            if len(shap_maps) >= 2:
-                shap_context = shap_maps[0]
-                shap_feature = shap_maps[1]
-                log(
-                    "DeepSHAP explanation computed for both Context and Feature.",
-                    "INFO",
-                )
-            elif len(shap_maps) == 1:
-                shap_context = shap_maps[0]
-                shap_feature = np.zeros_like(shap_maps[0])
-                log(
-                    "Only one SHAP map computed, setting feature SHAP to zero.",
-                    "WARNING",
-                )
-            else:
-                shap_context = np.zeros(x.shape[1])
-                shap_feature = np.zeros(x.shape[1])
-                log("No SHAP maps computed, setting both to zero.", "WARNING")
-
+            shap_result = self.explainer.explain(x, target_class=target)
+            shap_context, shap_feature = shap_result[0], shap_result[1]
+            
+            log("DeepSHAP explanation calculated successfully.", "INFO")
+        except Exception as e:
+             import traceback
+             log(f"DeepSHAP calculation failed.\nError: {e}\nTraceback: {traceback.format_exc()}", "ERROR")
+             shap_context = np.zeros(x.shape[1])
+             shap_feature = np.zeros(x.shape[1])
         finally:
             self._is_explaining = False
             if hasattr(self, "context_net"):
@@ -274,79 +318,145 @@ class MalConvGCTDeepShap(MalConvGCT):
 
     def seq2fix(self, x, pr_args={}):
         """
-        Overridden seq2fix from LowMemConvBase to capture indices for DeepSHAP.
+        Patched seq2fix that supports both LongTensor (Indices) and FloatTensor (Embeddings).
         """
         receptive_window, stride, out_channels = self.determinRF()
 
+        # If input is embeddings (Float), we explicitly disable the internal embedding lookup
+        # by temporarily mocking processRange or handling it here.
+        # But processRange calls self.embd(x).
+        # If x is Float, self.embd(x) will fail if self.embd is a real Embedding layer.
+        # So we must Bypass embedding if x is Float.
+        
+        is_embedding_input = x.is_floating_point()
+        
+        # Padding
         if x.shape[1] < receptive_window:
-            x = F.pad(x, (0, receptive_window - x.shape[1]), value=0)
+            pad_len = receptive_window - x.shape[1]
+            if is_embedding_input:
+                # Pad with zeros in embedding space
+                x = F.pad(x, (0, 0, 0, pad_len), value=0) # (B, L, D) -> pad last dim? No, dim 1 is Length.
+                # F.pad for 3D tensor (B, L, D): (pad_left, pad_right, pad_top, pad_bottom...)
+                # format is last dim backwards. D is last. We want to pad L (2nd to last).
+                # (0, 0, 0, pad_len) -> Pad D by 0, Pad L by pad_len
+            else:
+                x = F.pad(x, (0, pad_len), value=0)
 
         batch_size = x.shape[0]
         length = x.shape[1]
+        
+        # Max-Pooling Logic (Chunking)
+        # Optimization: Use cached winner indices if predicting for SHAP to ensure fixed graph and speed
+        
+        final_indices = None
+        if self._is_explaining and getattr(self, "saved_indices", None) is not None:
+             final_indices = self.saved_indices
+             # log("Using saved winner indices for SHAP", "INFO")
+             
+             # Handle batch size mismatch (SHAP batches inputs)
+             if len(final_indices) != batch_size:
+                 # If we have saved indices (e.g. from Batch=1 prediction), 
+                 # but SHAP passes multiple samples (e.g. baseline + input), 
+                 # we broadcast the saved indices to ensure consistent graph structure for DeepSHAP.
+                 if len(final_indices) == 1:
+                     final_indices = [final_indices[0]] * batch_size
+                 else:
+                     # Fallback for unexpected batch sizes: try to broadcast index 0 or warn
+                     # log(f"Warning: Saved indices size {len(final_indices)} != Batch size {batch_size}. Broadcasting index 0.", "WARNING")
+                     final_indices = [final_indices[0]] * batch_size
+        
+        if final_indices is None:
+            winner_values = np.zeros((batch_size, out_channels)) - 1.0
+            winner_indices = np.zeros((batch_size, out_channels), dtype=np.int64)
+                
+            step = self.chunk_size 
+            start = 0
+            end = start+step
+            
+            with torch.no_grad():
+                while start < end and (end-start) >= max(self.min_chunk_size, receptive_window):
+                    x_sub = x[:,start:end]
+                    
+                    # Handling Embedding Input
+                    if is_embedding_input:
+                        # Bypass standard processRange which expects indices
+                        x_emb = x_sub.transpose(1, 2) # (B, L, D) -> (B, D, L)
+                        activs = self._process_embeddings(x_emb, gct=pr_args.get('gct'))
+                    else:
+                        activs = self.processRange(x_sub.long(), **pr_args)
+                        
+                    activ_win, activ_indx = F.max_pool1d(activs, kernel_size=activs.shape[2], return_indices=True)
+                    
+                    activ_win = activ_win.cpu().numpy()[:,:,0]
+                    activ_indx = activ_indx.cpu().numpy()[:,:,0]
+                    selected = winner_values < activ_win
+                    winner_indices[selected] = activ_indx[selected]*stride + start 
+                    winner_values[selected]  = activ_win[selected]
+                    start = end
+                    end = min(start+step, length)
 
-        winner_values = np.zeros((batch_size, out_channels)) - 1.0
-        winner_indices = np.zeros((batch_size, out_channels), dtype=np.int64)
+            final_indices = [np.unique(winner_indices[b,:]) for b in range(batch_size)]
+            
+            # Save indices for SHAP use later
+            if not self._is_explaining:
+                 self.saved_indices = final_indices
 
-        if not hasattr(self, "device_ids"):
-            cur_device = next(self.embd.parameters()).device
-        else:
-            cur_device = None
-
-        step = self.chunk_size
-        start = 0
-        end = start + step
-
-        with torch.no_grad():
-            while start < end and (end - start) >= max(
-                self.min_chunk_size, receptive_window
-            ):
-                x_sub = x[:, start:end]
-                if cur_device is not None:
-                    x_sub = x_sub.to(cur_device)
-                activs = self.processRange(x_sub.long(), **pr_args)
-                activ_win, activ_indx = F.max_pool1d(
-                    activs, kernel_size=activs.shape[2], return_indices=True
-                )
-
-                activ_win = activ_win.cpu().numpy()[:, :, 0]
-                activ_indx = activ_indx.cpu().numpy()[:, :, 0]
-                selected = winner_values < activ_win
-                winner_indices[selected] = activ_indx[selected] * stride + start
-                winner_values[selected] = activ_win[selected]
-                start = end
-                end = min(start + step, length)
-
-        final_indices = [np.unique(winner_indices[b, :]) for b in range(batch_size)]
-
-        is_explaining = getattr(self, "_is_explaining", False)
-
-        if is_explaining:
-            if not hasattr(self, "_shap_captured_indices"):
-                self._shap_captured_indices = []
-            self._shap_captured_indices.append(final_indices)
-
-        chunk_list = [
-            [
-                x[
-                    b : b + 1,
-                    max(i - receptive_window, 0) : min(i + receptive_window, length),
-                ]
-                for i in final_indices[b]
-            ]
-            for b in range(batch_size)
-        ]
-        chunk_list = [torch.cat(c, dim=1)[0, :] for c in chunk_list]
-
+        # Gathering Selected Chunks
+        chunk_list = []
+        for b in range(batch_size):
+            chunks = []
+            for i in final_indices[b]:
+                s = max(i-receptive_window, 0)
+                e = min(i+receptive_window, length)
+                chunks.append(x[b:b+1, s:e])
+            chunk_list.append(chunks)
+            
+        chunk_list = [torch.cat(c, dim=1)[0,:] for c in chunk_list]
         x_selected = torch.nn.utils.rnn.pad_sequence(chunk_list, batch_first=True)
+        
 
+        cur_device = next(self.parameters()).device
         if cur_device is not None:
             x_selected = x_selected.to(cur_device)
-        x_selected = self.processRange(x_selected.long(), **pr_args)
+
+        # Final Processing of Selected Chunks (With Gradients)
+        if is_embedding_input:
+             x_emb = x_selected.transpose(1, 2)
+             x_selected = self._process_embeddings(x_emb, gct=pr_args.get('gct'))
+        else:
+             x_selected = self.processRange(x_selected.long(), **pr_args)
+             
         x_selected = self.pooling(x_selected)
         x_selected = x_selected.view(x_selected.size(0), -1)
-
+            
         return x_selected
 
+    def _process_embeddings(self, x, gct=None):
+        """
+        Helper to run convolutions on embeddings (skipping self.embd).
+        x shape: (B, Channels/EmbSize, Length)
+        """
+        # Logic copied from MalConvGCT.processRange but starting after self.embd
+        
+        # x is already permuted to (B, C, L) by caller
+        
+        for conv_glu, linear_cntx, conv_share in zip(self.convs, self.linear_atn, self.convs_share):
+            x = F.glu(conv_glu(x), dim=1)
+            x = F.leaky_relu(conv_share(x))
+            
+            B = x.shape[0]
+            C = x.shape[1]
+            
+            if gct is not None:
+                ctnx = torch.tanh(linear_cntx(gct))
+                ctnx = torch.unsqueeze(ctnx, dim=2)
+                x_tmp = x.view(1,B*C,-1) 
+                x_tmp = F.conv1d(x_tmp, ctnx, groups=B)
+                x_gates = x_tmp.view(B, 1, -1)
+                gates = torch.sigmoid( x_gates )
+                x = x * gates
+        
+        return x
 
 def compute_deep_shap(model, input_tensor, target_class=1):
     explainer = DeepShapExplainer(model)
