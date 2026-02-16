@@ -9,23 +9,15 @@ model:
     embd_size: 8
     num_classes: 2
 
-shap_nsamples: 10 # Number of samples for GradientExplainer approximation (Lower = Faster, but typical 10-20 to capture context)
-shap_fast_approximation: false # Set to FALSE to capture Saturated Context (Uses GradientExplainer)
-
 attack:
   # Adversarial Attack Settings
-  # Padding length ratio relative to the original file size (0.01 = 1%)
-  padding_ratio: 0.01
-  
-  # Number of optimization iterations (T)
-  iterations: 20
+  padding_ratio: 0.01      # Padding length ratio relative to original file size (0.01 = 1%)
+  iterations: 20            # Number of optimization iterations (T)
 
 explainability:
-  deep_shap:
-    # Baseline value for SHAP calculation
-    # Options: 
-    # - 'zero': Compare against all zeros (padding token)
-    # - 'embedding_mean': Compare against the average of embedding vectors
-    baseline: "zero"
-    approximation : true
+  integrated_gradients:
+    n_steps: 50             # Number of interpolation steps (higher = more accurate, slower)
+    target_class: 1         # Target class for attribution (1 = Malware)
+    baseline: "zero"        # Baseline type: "zero" (zero embedding vector)
+    epsilon: 1e-7           # Numerical stability threshold for DeepLIFT Rescale Rule
     
