@@ -13,6 +13,8 @@ attack:
   # Adversarial Attack Settings
   padding_ratio: 0.01      # Padding length ratio relative to original file size (0.01 = 1%)
   iterations: 20            # Number of optimization iterations (T)
+  target_class: 0           # Target class to push towards (0 = Benign)
+  success_threshold: 0.5    # Malware probability below this = attack success
 
 explainability:
   integrated_gradients:
