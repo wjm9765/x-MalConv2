@@ -10,8 +10,8 @@ dependencies = [
     "pyyaml>=6.0.3",
     "matplotlib",
     "tqdm",
-    "shap",
-    "numba>=0.56.0",
+    "streamlit",
+    "plotly",
 ]
 
 [tool.hatch.build.targets.wheel]
