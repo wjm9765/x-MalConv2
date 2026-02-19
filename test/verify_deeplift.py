@@ -6,10 +6,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../m
 import torch, numpy as np, importlib
 import src.compute_DeepShap
 importlib.reload(src.compute_DeepShap)
-from src.compute_DeepShap import MalConvGCTDeepShap
+from src.compute_DeepShap import MalConvGCTExplainable
 
 # Small model for fast test
-model = MalConvGCTDeepShap(out_size=2, channels=16, window_size=32, stride=8, embd_size=8)
+model = MalConvGCTExplainable(out_size=2, channels=16, window_size=32, stride=8, embd_size=8)
 model.eval()
 
 dummy = torch.randint(1, 256, (1, 2000)).long()

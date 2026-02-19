@@ -1,4 +1,4 @@
-# MalConvGCTDeepShap Adversarial Attack & Comparison Test
+# MalConvGCTExplainable Adversarial Attack & Comparison Test
 import sys
 import os
 import torch
@@ -46,7 +46,7 @@ else:
 
 # 2. Imports (Now that paths are set)
 try:
-    from src.compute_DeepShap import MalConvGCTDeepShap
+    from src.compute_DeepShap import MalConvGCTExplainable
     from src.adversarial_malware import generate_adversarial_example
     from src import preprocess_pe_file
     from src.utils import load_config
@@ -72,7 +72,7 @@ def create_new_model():
     stride = 64
     embd_size = 8
     
-    model = MalConvGCTDeepShap(out_size=2, channels=channels, window_size=window_size, stride=stride, embd_size=embd_size)
+    model = MalConvGCTExplainable(out_size=2, channels=channels, window_size=window_size, stride=stride, embd_size=embd_size)
     
     if malconv_path:
         checkpoint_path = os.path.join(malconv_path, 'malconvGCT_nocat.checkpoint')

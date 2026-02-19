@@ -11,14 +11,14 @@ import numpy as np
 import importlib
 import src.compute_DeepShap as cds
 importlib.reload(cds)
-from src.compute_DeepShap import MalConvGCTDeepShap
+from src.compute_DeepShap import MalConvGCTExplainable
 from MalConvGCT_nocat import MalConvGCT
 
 # ─── 1. Load real model ───
 device = torch.device('cpu')
 ckpt_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'MalConv2-main', 'malconvGCT_nocat.checkpoint')
 
-model = MalConvGCTDeepShap(channels=256, window_size=256, stride=64, embd_size=8, out_size=2)
+model = MalConvGCTExplainable(channels=256, window_size=256, stride=64, embd_size=8, out_size=2)
 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 model.load_state_dict(ckpt['model_state_dict'], strict=False)
 model.to(device).eval()
