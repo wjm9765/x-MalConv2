@@ -4,17 +4,19 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# ── 0. Activate virtual environment ───────────────────────────────
-source "$PROJECT_ROOT/.venv/bin/activate"
+if [ -f "$PROJECT_ROOT/.venv/bin/activate" ]; then
+    source "$PROJECT_ROOT/.venv/bin/activate"
+fi
+export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/models/MalConv2-main:${PYTHONPATH:-}"
 
 # ── 1. Extract data.zip if needed ──────────────────────────────────
 if [ ! -d "data" ] || [ -z "$(ls -A data 2>/dev/null)" ]; then
     if [ -f "data.zip" ]; then
-        echo "📦 Extracting data.zip..."
-        unzip -o -P infected data.zip
-        echo "✅ Data extracted."
+        echo "Extracting data.zip..."
+        unzip -o -P 'xMalConv-2026' data.zip
+        echo "Data extracted."
     else
-        echo "❌ data.zip not found and data/ directory is empty or missing."
+        echo "data.zip not found and data/ directory is empty or missing."
         exit 1
     fi
 else
@@ -24,8 +26,8 @@ fi
 # ── 2. Launch Streamlit app ────────────────────────────────────────
 if [ -n "$1" ]; then
     echo "🎯 Target file: $1"
-    exec streamlit run src/streamlit_app.py -- --file "$1"
+    exec streamlit run src/streamlit_app.py --server.headless true --server.address 0.0.0.0 -- --file "$1"
 else
     echo "📊 Processing all files in data/"
-    exec streamlit run src/streamlit_app.py
+    exec streamlit run src/streamlit_app.py --server.headless true --server.address 0.0.0.0
 fi
