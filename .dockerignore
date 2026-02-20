@@ -1,0 +1,11 @@
+.git
+.gitignore
+.venv
+.ruff_cache
+.DS_Store
+__pycache__
+test
+data
+README.md
+Dockerfile
+.dockerignore
